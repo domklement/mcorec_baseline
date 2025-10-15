@@ -51,7 +51,6 @@ def load_model():
     
 
 def inference(model, video, audio):
-    return torch.rand((1, video.shape[2], 1024))
     avhubert_features = model.encoder(
         input_features = audio,
         video = video,
