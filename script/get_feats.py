@@ -20,6 +20,7 @@ import json
 import math
 from tqdm import tqdm
 import glob
+import warnings
 
 FPS = 25
 
@@ -166,11 +167,30 @@ def mcorec_session_infer(model, av_data_collator, session_dir, output_dir: Path,
         spk_output_dir = output_dir / speaker_name
         os.makedirs(spk_output_dir, exist_ok=True)
 
+        # Check all the crops and select only the unique ones.
+        # session_60 has duplicated tracks.
+        unique_tracks = []
+        unique_crop_metadata = set()
         for track in speaker_data['central']['crops']:
-            video_path = os.path.join(session_dir, track['lip'])
-            asd_path = os.path.join(session_dir, track['asd']) if 'asd' in track else None
             with open(os.path.join(session_dir, track['crop_metadata']), "r") as f:
                 crop_metadata = json.load(f)
+            track['crop_metadata'] = crop_metadata
+            key = (crop_metadata['start_time'], crop_metadata['end_time'])
+            if key not in unique_crop_metadata:
+                unique_crop_metadata.add(key)
+                unique_tracks.append(track)
+
+        if len(unique_tracks) != len(speaker_data['central']['crops']):
+            warnings.warn(f'The number of unique tracks is different from the total number of tracks. '
+                          f'Duplicated tracks will be ignored: session: {os.path.basename(session_dir)}, speaker: {speaker_name}')
+
+        # for track in speaker_data['central']['crops']:
+        for track in unique_tracks:
+            video_path = os.path.join(session_dir, track['lip'])
+            asd_path = os.path.join(session_dir, track['asd']) if 'asd' in track else None
+            # with open(os.path.join(session_dir, track['crop_metadata']), "r") as f:
+            #     crop_metadata = json.load(f)
+            crop_metadata = track['crop_metadata']
             track_start_time = crop_metadata['start_time']
             speaker_feats.extend(infer_video(
                 model,
