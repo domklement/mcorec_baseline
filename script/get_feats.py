@@ -10,9 +10,9 @@ from src.talking_detector.segmentation import segment_by_asd
 from datasets import load_from_disk
 import torch, torchvision, torchaudio
 from src.cluster.conv_spks import (
-    get_speaker_activity_segments, 
-    calculate_conversation_scores, 
-    cluster_speakers, 
+    get_speaker_activity_segments,
+    calculate_conversation_scores,
+    cluster_speakers,
     get_clustering_f1_score
 )
 from torchcodec.decoders import VideoDecoder
@@ -31,24 +31,24 @@ def load_model():
         sp_model_path=sp_model_path,
         dict_path=dict_path,
     )
-    
+
     # Load data collator
     audio_transform = AudioTransform(subset="test")
     video_transform = VideoTransform(subset="test")
-    
+
     av_data_collator = DataCollator(
         text_transform=text_transform,
         audio_transform=audio_transform,
         video_transform=video_transform,
     )
-    
+
     # Load model
-    model_name = "./model-bin/avsr_cocktail"
+    model_name = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model-bin/avsr_cocktail")
     avsr_model = AVHubertAVSR.from_pretrained(model_name)
     avsr_model.eval()
-    
+
     return avsr_model.avsr, text_transform, av_data_collator
-    
+
 
 def inference(model, video, audio):
     avhubert_features = model.encoder(
@@ -98,7 +98,7 @@ def chunk_video(video_path, asd_path=None, max_length=10):
             end_time = min((i + step_size) / 100, video_duration)
             assert start_time < end_time
             segments.append((start_time, end_time))
-        
+
     # if len(segments) > 0:
     #     print(f"Total segments: {len(segments)}")
     #     for idx, seg in enumerate(segments):
@@ -192,7 +192,7 @@ def mcorec_session_infer(model, av_data_collator, session_dir, output_dir: Path,
                 filled_in_feat_sequence.append(segment['feats'])
 
             concat_seq = torch.concat(filled_in_feat_sequence, dim=0)
-            assert concat_seq.shape[0] / FPS - speaker_feats[-1]['end_time'] < 1e-3
+            assert concat_seq.shape[0] / FPS - speaker_feats[-1]['end_time'] < 1e-3, f'END TIMES DO NOT MATCH: {concat_seq.shape[0] / FPS - speaker_feats[-1]["end_time"]}'
 
             n_frames_diff = total_num_frames - concat_seq.shape[0]
             assert n_frames_diff >= 0
@@ -214,8 +214,8 @@ def main():
                         choices=['per_track', 'per_speaker_tracks_combined', 'both'],
                         default='per_speaker_tracks_combined',
                         help='''
-                        per_track - one sequence of tensors per one track, 
-                        per_speaker_tracks_combined - concat tracks with using `fill_gaps_method`, 
+                        per_track - one sequence of tensors per one track,
+                        per_speaker_tracks_combined - concat tracks with using `fill_gaps_method`,
                         both - performs the both previously mentioned methods.
                         ''')
     parser.add_argument('--fill_gaps_method', type=str,
@@ -227,12 +227,25 @@ def main():
     output_dir = Path(opt.output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
+    # If we have a safe_gpu installed, we use it to select a free GPU.
+    try:
+        from safe_gpu import safe_gpu
+        from time import sleep
+        while True:
+            try:
+                safe_gpu.claim_gpus(1)
+                break
+            except:
+                sleep(1)
+    except:
+        pass
+
     device = torch.device(opt.device)
 
-    # Load model    
+    # Load model
     model, text_transform, av_data_collator = load_model()
     model = model.to(device)
-    
+
     if opt.session_dir.strip().endswith("*"):
         all_session_dirs = glob.glob(opt.session_dir)
     else:
@@ -252,5 +265,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
- 
+
+
