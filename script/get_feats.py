@@ -50,10 +50,12 @@ def load_model():
     return avsr_model.avsr, text_transform, av_data_collator
 
 
-def inference(model, video, audio):
+def inference(model, video, audio, embed_source, layers):
     avhubert_features = model.encoder(
         input_features = audio,
         video = video,
+        embed_source = embed_source,
+        layers = layers,
     )
     audiovisual_feat = avhubert_features.last_hidden_state
     return audiovisual_feat
@@ -118,7 +120,7 @@ def format_vtt_timestamp(timestamp):
 def infer_video(
     model,
     av_data_collator,
-    video_path, device, asd_path=None, offset=0.
+    video_path, embed_source, layers, device, asd_path=None, offset=0.
 ):
     # asd_path = None -> equal-length segments
     asd_path=None
@@ -137,7 +139,7 @@ def infer_video(
         audio_lengths = sample_features["audio_lengths"]
         video_lengths = sample_features["video_lengths"]
         with torch.no_grad():
-            segment_feats = inference(model, videos.to(device), audios.to(device)).cpu()
+            segment_feats = inference(model, videos.to(device), audios.to(device), embed_source, layers).cpu()
             segment_output.extend(list(segment_feats))
 
     return [
@@ -148,7 +150,7 @@ def infer_video(
         } for seg, output in zip(segments, segment_output)
     ]
 
-def mcorec_session_infer(model, av_data_collator, session_dir, output_dir: Path, save_mode, fill_gaps_method, device):
+def mcorec_session_infer(model, av_data_collator, session_dir, output_dir: Path, save_mode, fill_gaps_method, embed_source, layers, device):
     # Infer session
     with open(os.path.join(session_dir, "metadata.json"), "r") as f:
         metadata = json.load(f)
@@ -174,6 +176,8 @@ def mcorec_session_infer(model, av_data_collator, session_dir, output_dir: Path,
                 model,
                 av_data_collator,
                 video_path,
+                embed_source=embed_source,
+                layers=layers,
                 device=device,
                 asd_path=asd_path,
                 offset=track_start_time))
@@ -188,7 +192,7 @@ def mcorec_session_infer(model, av_data_collator, session_dir, output_dir: Path,
             for segment, gap_before in zip(speaker_feats, gaps):
                 if gap_before > 0:
                     if fill_gaps_method == 'fill_zeros':
-                        filled_in_feat_sequence.append(torch.zeros(gap_before, segment['feats'].shape[-1]))
+                        filled_in_feat_sequence.append(torch.zeros(gap_before, *segment['feats'].shape[-2:]))
                 filled_in_feat_sequence.append(segment['feats'])
 
             concat_seq = torch.concat(filled_in_feat_sequence, dim=0)
@@ -197,7 +201,7 @@ def mcorec_session_infer(model, av_data_collator, session_dir, output_dir: Path,
             n_frames_diff = total_num_frames - concat_seq.shape[0]
             assert n_frames_diff >= 0
             if n_frames_diff > 0:
-                concat_seq = torch.concat((concat_seq, torch.zeros((n_frames_diff, concat_seq.shape[1]))), dim=0)
+                concat_seq = torch.concat((concat_seq, torch.zeros((n_frames_diff, *concat_seq.shape[-2:]))), dim=0)
 
             assert concat_seq.shape[0] == total_num_frames
             torch.save(concat_seq, spk_output_dir / "all_tracks.pt")
@@ -222,6 +226,15 @@ def main():
                         choices=['fill_zeros'],
                         default='fill_zeros',
                         help='fill_zeros - fill track gaps with zero tensors of the same dimension and frame-rate as the video features (25fps).')
+    parser.add_argument('--embed-source',
+                        choices=['av_last_layer', 'av_all_layers', 'vision_only'],
+                        default='av_last_layer',
+                        help='av - both modalities are passed to encoder, features are taken from the multi-modal tarnsformer encoder, '
+                             'av_v_only - only video is passed to encoder, audio is set to 0, features are taken from the multi-modal tarnsformer encoder, '
+                             'vision_only - embeddings extracted by the vision encoder (before av transformer encoder) - ResNet.'
+                        )
+    parser.add_argument('--layers', type=str, default="-1", help='Either a number, -1 - last, all - return all layers stacked in one tensor.')
+
     opt = parser.parse_args()
 
     output_dir = Path(opt.output_dir)
@@ -261,6 +274,8 @@ def main():
                              output_dir=session_output_dir,
                              save_mode=opt.save_mode,
                              fill_gaps_method=opt.fill_gaps_method,
+                             embed_source=opt.embed_source,
+                             layers=opt.layers,
                              device=device)
 
 if __name__ == "__main__":

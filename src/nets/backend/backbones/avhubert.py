@@ -452,9 +452,14 @@ class AVHubertModel(PreTrainedModel):
         padding_mask: Optional[torch.Tensor] = None,
         mask: bool = True,
         features_only: bool = False,
+        embed_source: Optional[str] = None,
+        layers: Optional[str] = None,
         output_layer: Optional[int] = None,
         video: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
+        if layers is None:
+            layers = "-1"
+
         """output layer is 1-based"""
         src_audio, src_video = source['audio'], source['video']
         if mask and self.masking_type == 'input':
@@ -464,9 +469,16 @@ class AVHubertModel(PreTrainedModel):
         else:
             src_audio, src_video, mask_indices = src_audio, src_video, None
 
+        if embed_source == 'vision_only' and features_only:
+            features_video = self.forward_features(src_video, modality='video')
+            features_video = features_video.transpose(-1,-2).unsqueeze(1)
+            return {"x": features_video, "padding_mask": padding_mask, "features": features_video}
+
         features_audio = self.forward_features(src_audio, modality='audio') # features: [B, F, T]
         features_video = self.forward_features(src_video, modality='video')
-        
+
+        if embed_source == 'av_v_only':
+            features_audio = 0 * features_audio
         
         if self.modality == 'audio':
             features_video = 0 * features_video
@@ -480,8 +492,6 @@ class AVHubertModel(PreTrainedModel):
                         features_audio = 0 * features_audio
                     else:
                         features_video = 0 * features_video
-                    
-
         
         if self.modality_fuse == 'concat':
             features = torch.cat([features_audio, features_video], dim=1)
@@ -513,7 +523,16 @@ class AVHubertModel(PreTrainedModel):
         # padding_mask: (B, T), bool
         # mask_indices: (B, T), bool
         
-        x = self.encoder(x, attention_mask=padding_mask)[0]
+        x = self.encoder(x, attention_mask=padding_mask, output_hidden_states=True)
+        if layers == "all":
+            x = torch.stack(x.hidden_states).permute(1, 2, 0, 3)
+        else:
+            try:
+                layers = int(layers)
+                x = x.hidden_states[layers].unsqueeze(2)
+            except:
+                raise ValueError("layers should be 'all' or an integer")
+
         # x = self.encoder(
         #     x,
         #     # attention_mask=padding_mask,
@@ -548,6 +567,8 @@ class AVHubertModel(PreTrainedModel):
         input_features: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         video: torch.Tensor = None,
+        embed_source: Optional[str] = None,
+        layers: Optional[str] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         res = self.forward_gen(
@@ -556,6 +577,8 @@ class AVHubertModel(PreTrainedModel):
             mask=False,
             features_only=True,
             output_layer=None,
+            embed_source=embed_source,
+            layers=layers,
         )
         feature = res["x"]
         return BaseModelOutput(last_hidden_state=feature, hidden_states=None, attentions=None)
