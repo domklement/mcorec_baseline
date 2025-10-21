@@ -246,8 +246,8 @@ def main():
                         choices=['fill_zeros'],
                         default='fill_zeros',
                         help='fill_zeros - fill track gaps with zero tensors of the same dimension and frame-rate as the video features (25fps).')
-    parser.add_argument('--embed-source',
-                        choices=['av_last_layer', 'av_all_layers', 'vision_only'],
+    parser.add_argument('--embed_source',
+                        choices=['av', 'av_v_only', 'vision_only'],
                         default='av_last_layer',
                         help='av - both modalities are passed to encoder, features are taken from the multi-modal tarnsformer encoder, '
                              'av_v_only - only video is passed to encoder, audio is set to 0, features are taken from the multi-modal tarnsformer encoder, '
