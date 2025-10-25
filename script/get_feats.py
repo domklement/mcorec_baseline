@@ -22,9 +22,62 @@ from tqdm import tqdm
 import glob
 import warnings
 
+from transformers import AutoImageProcessor, AutoModel
+from script.dino_inference import read_video_frames, batched
+from torch import nn
+
 FPS = 25
 
-def load_model():
+class Dino(nn.Module):
+    def __init__(self, model_id, device):
+        super().__init__()
+
+        print(f"[INFO] Loading DINOv3 model: {model_id}")
+        self.processor = AutoImageProcessor.from_pretrained(model_id)
+        self.model = AutoModel.from_pretrained(
+            model_id,
+            dtype=torch.bfloat16,
+            device_map="cpu",
+        )
+        self.model.eval().to(device)
+        self.device = device
+
+        # mixed precision context
+        amp_dtype = {
+            "float32": torch.float32,
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+        }['float32']
+
+    def __call__(self, video_path):
+        frames, frame_indices = read_video_frames(
+            video_path, frame_stride=1, max_frames=1000000000
+        )
+        if len(frames) == 0:
+            raise RuntimeError("No frames decoded from the video.")
+
+        all_embeds = []
+        with torch.no_grad():
+            for batch in tqdm(batched(frames, 1), total=len(frames)):
+                inputs = self.processor(images=batch, return_tensors="pt")
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+                outputs = self.model(**inputs)
+
+                # Prefer pooled embedding if available; else use CLS token (index 0)
+                if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
+                    emb = outputs.pooler_output  # [B, D]
+                else:
+                    # last_hidden_state: [B, seq_len, D] -> take CLS at position 0
+                    emb = outputs.last_hidden_state[:, 0, :]  # [B, D]
+
+                # Move to CPU in float32 for consistent saving
+                all_embeds.append(emb.detach().to("cpu", dtype=torch.float32))
+
+        return torch.stack(all_embeds).unsqueeze(0)
+
+
+def load_model(is_dino: bool = False, device: str = "cpu"):
     # Load text transform
     sp_model_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "src/tokenizer/spm/unigram/unigram5000.model")
     dict_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "src/tokenizer/spm/unigram/unigram5000_units.txt")
@@ -44,11 +97,15 @@ def load_model():
     )
 
     # Load model
-    model_name = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model-bin/avsr_cocktail")
-    avsr_model = AVHubertAVSR.from_pretrained(model_name)
-    avsr_model.eval()
+    if is_dino:
+        model = Dino(model_id="facebook/dinov3-vits16-pretrain-lvd1689m", device=device)
+    else:
+        model_name = os.path.join(os.path.dirname(os.path.dirname(__file__)), "model-bin/avsr_cocktail")
+        avsr_model = AVHubertAVSR.from_pretrained(model_name)
+        avsr_model.eval()
+        model = avsr_model.avsr
 
-    return avsr_model.avsr, text_transform, av_data_collator
+    return model, text_transform, av_data_collator
 
 
 def inference(model, video, audio, embed_source, layers):
@@ -134,14 +191,18 @@ def infer_video(
             "start_time": seg[0],
             "end_time": seg[1],
         }
-        sample_features = av_data_collator([sample])
-        audios = sample_features["audios"]
-        videos = sample_features["videos"]
-        audio_lengths = sample_features["audio_lengths"]
-        video_lengths = sample_features["video_lengths"]
-        with torch.no_grad():
-            segment_feats = inference(model, videos.to(device), audios.to(device), embed_source, layers).cpu()
-            segment_output.extend(list(segment_feats))
+
+        if embed_source == 'dinov3':
+            model(video_path)
+        else:
+            sample_features = av_data_collator([sample])
+            audios = sample_features["audios"]
+            videos = sample_features["videos"]
+            audio_lengths = sample_features["audio_lengths"]
+            video_lengths = sample_features["video_lengths"]
+            with torch.no_grad():
+                segment_feats = inference(model, videos.to(device), audios.to(device), embed_source, layers).cpu()
+                segment_output.extend(list(segment_feats))
 
     return [
         {
@@ -247,7 +308,7 @@ def main():
                         default='fill_zeros',
                         help='fill_zeros - fill track gaps with zero tensors of the same dimension and frame-rate as the video features (25fps).')
     parser.add_argument('--embed_source',
-                        choices=['av', 'av_v_only', 'vision_only'],
+                        choices=['av', 'av_v_only', 'vision_only', 'dinov3'],
                         default='av_last_layer',
                         help='av - both modalities are passed to encoder, features are taken from the multi-modal tarnsformer encoder, '
                              'av_v_only - only video is passed to encoder, audio is set to 0, features are taken from the multi-modal tarnsformer encoder, '
@@ -276,7 +337,7 @@ def main():
     device = torch.device(opt.device)
 
     # Load model
-    model, text_transform, av_data_collator = load_model()
+    model, text_transform, av_data_collator = load_model(is_dino=opt.embed_source == 'dinov3', device=device)
     model = model.to(device)
 
     if opt.session_dir.strip().endswith("*"):
