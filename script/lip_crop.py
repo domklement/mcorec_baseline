@@ -16,16 +16,19 @@ import json
 import ffmpeg
 import glob
 import cv2
+from torchcodec.decoders import VideoDecoder
+
 
 FACE_CROP_SIZE=224
 FACE_CROP_MARGIN=12
+LIP_CROP_SIZE=96
 FPS=25
 
 # ==================== LOAD MODEL ====================
 
 device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
 landmarks_detector = LandmarksDetector(device=device)
-video_process = VideoProcess(convert_gray=False)
+video_process = VideoProcess(crop_width=LIP_CROP_SIZE, crop_height=LIP_CROP_SIZE, convert_gray=False)
 face_video_process = VideoProcess(crop_width=FACE_CROP_SIZE,
                                   crop_height=FACE_CROP_SIZE,
                                   start_idx=0,
@@ -33,15 +36,67 @@ face_video_process = VideoProcess(crop_width=FACE_CROP_SIZE,
                                   convert_gray=False,
                                   window_margin=FACE_CROP_MARGIN)
 
+class LazyVideo:
+    def __init__(self, video_path: str):
+        self.video_path = video_path
+        self.decoder = VideoDecoder(
+            video_path,
+            device="cpu",
+            seek_mode="exact",
+            num_ffmpeg_threads=1,
+            dimension_order="NHWC",
+        )
+        self.num_frames = self.decoder.metadata.num_frames
+        self.stride = 128
+        self.chunk_size = 128
+
+        self.chunk_start_idx = 0
+        self.chunk_cache = None
+
+    def __len__(self):
+        return self.num_frames
+
+    def __getitem__(self, idx: int):
+        if idx >= self.num_frames or idx < 0:
+            raise IndexError("Index out of range")
+
+        if self.chunk_start_idx <= idx <= self.chunk_start_idx + self.chunk_size - 1:
+            return self.chunk_cache[idx - self.chunk_start_idx]
+
+        chunk_idx = idx // self.chunk_size
+        self.chunk_start_idx = chunk_idx - self.chunk_size // 2
+        self.chunk_cache = self.decoder.get_frames_in_range(self.chunk_start_idx, self.chunk_start_idx + self.chunk_size).data.numpy()
+
+        # Call itself to get the frame after loading the chunk to the internal cache.
+        return self.__getitem__(idx)
+
+    def __iter__(self):
+        # Decode only the frames we need; each call decodes just that slice.
+        for start in range(0, self.num_frames, self.stride):
+            stop = min(start + self.chunk_size, self.num_frames)
+            # Decodes [start, stop) frames only — nothing else is kept in memory
+            frames = self.decoder.get_frames_in_range(start=start, stop=stop).data.numpy()  # (N, C, H, W), dtype=uint8
+            self.chunk_start_idx = start
+            self.chunk_cache = frames
+
+            for f in frames:
+                yield f
+
+    @property
+    def fps(self):
+        return self.decoder.metadata.average_fps
+
+
 def process_video(video_path, output_dir=None, process_audio=True):
     try:
         if process_audio:
             # Load and process audio and video
             audio, sample_rate = torchaudio.load(video_path, normalize=True)
 
-        video, _, meta_info = torchvision.io.read_video(video_path)
-        video = video.numpy()
-        assert meta_info['video_fps'] == FPS
+        # video, _, meta_info = torchvision.io.read_video(video_path)
+        # video = video.numpy()
+        video = LazyVideo(video_path)
+        assert video.fps == FPS
         landmarks = landmarks_detector(video, output_face_bboxes=False)
 
         face_segment_name = video_path.split("/")[-1].replace(".mp4", "")
@@ -50,13 +105,25 @@ def process_video(video_path, output_dir=None, process_audio=True):
             output_dir = os.path.dirname(video_path)
         os.makedirs(output_dir, exist_ok=True)
 
-        face_crop_video = face_video_process(video, landmarks)
-        video = video_process(video, landmarks)
-        video = torch.tensor(video)
+        face_crop_vid_writer = cv2.VideoWriter(
+            os.path.join(output_dir, f"{face_segment_name}.mp4"),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            FPS,
+            (FACE_CROP_SIZE, FACE_CROP_SIZE),   # <-- (W, H)
+            isColor=True
+        )
+        face_video_process(video, landmarks, cv2_writer=face_crop_vid_writer)
+        face_crop_vid_writer.release()
 
-        dst_vid_filename = os.path.join(output_dir, f"{segment_name}.mp4")
-        save2vid(os.path.join(output_dir, f"{face_segment_name}.mp4"), face_crop_video, FPS)
-        save2vid(dst_vid_filename, video, FPS)
+        lip_crop_vid_writer = cv2.VideoWriter(
+            os.path.join(output_dir, f"{segment_name}.mp4"),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            FPS,
+            (LIP_CROP_SIZE, LIP_CROP_SIZE),  # <-- (W, H)
+            isColor=True
+        )
+        video_process(video, landmarks, cv2_writer=lip_crop_vid_writer)
+        lip_crop_vid_writer.release()
 
         if process_audio:
             dst_aud_filename = os.path.join(output_dir, f"{segment_name}.wav")

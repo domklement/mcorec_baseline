@@ -73,7 +73,7 @@ class VideoProcess:
         self.window_margin = window_margin
         self.convert_gray = convert_gray
 
-    def __call__(self, video, landmarks):
+    def __call__(self, video, landmarks, cv2_writer=None):
         # Pre-process landmarks: interpolate frames that are not detected
         preprocessed_landmarks = self.interpolate_landmarks(landmarks)
         # Exclude corner cases: no landmark in all frames or number of frames is less than window length
@@ -83,11 +83,14 @@ class VideoProcess:
         ):
             return
         # Affine transformation and crop patch
-        sequence = self.crop_patch(video, preprocessed_landmarks)
+        sequence = self.crop_patch(video, preprocessed_landmarks, cv2_writer=cv2_writer)
+        if cv2_writer is not None:
+            return None
+
         assert sequence is not None, "crop an empty patch."
         return sequence
 
-    def crop_patch(self, video, landmarks):
+    def crop_patch(self, video, landmarks, cv2_writer=None):
         sequence = []
         for frame_idx, frame in enumerate(video):
             window_margin = min(
@@ -114,7 +117,14 @@ class VideoProcess:
                 self.crop_height // 2,
                 self.crop_width // 2,
             )
-            sequence.append(patch)
+
+            if cv2_writer is not None:
+                cv2_writer.write(cv2.cvtColor(patch, cv2.COLOR_RGB2BGR))
+            else:
+                sequence.append(patch)
+
+        if cv2_writer is not None:
+            return None
         return np.array(sequence)
 
     def interpolate_landmarks(self, landmarks):
