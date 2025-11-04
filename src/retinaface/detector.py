@@ -22,12 +22,14 @@ class LandmarksDetector:
         )
         self.landmark_detector = FANPredictor(device=device, model=None)
 
-    def __call__(self, video_frames):
+    def __call__(self, video_frames, output_face_bboxes=False):
+        face_bboxes = []
         landmarks = []
         for frame in tqdm(video_frames, desc="Detecting landmarks"):
             detected_faces = self.face_detector(frame, rgb=False)
             face_points, _ = self.landmark_detector(frame, detected_faces, rgb=True)
             if len(detected_faces) == 0:
+                face_bboxes.append(None)
                 landmarks.append(None)
             else:
                 max_id, max_size = 0, 0
@@ -36,4 +38,9 @@ class LandmarksDetector:
                     if bbox_size > max_size:
                         max_id, max_size = idx, bbox_size
                 landmarks.append(face_points[max_id])
+                face_bboxes.append(detected_faces[max_id, :4])
+
+        if output_face_bboxes:
+            return landmarks, face_bboxes
+
         return landmarks
