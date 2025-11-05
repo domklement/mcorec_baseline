@@ -62,6 +62,7 @@ class VideoProcess:
         stop_idx=68,
         window_margin=12,
         convert_gray=True,
+        max_interpolation_length=12,
     ):
         self.reference = np.load(
             os.path.join(os.path.dirname(__file__), mean_face_path)
@@ -72,6 +73,7 @@ class VideoProcess:
         self.stop_idx = stop_idx
         self.window_margin = window_margin
         self.convert_gray = convert_gray
+        self.max_interpolation_length = max_interpolation_length
 
     def __call__(self, video, landmarks, cv2_writer=None):
         # Pre-process landmarks: interpolate frames that are not detected
@@ -92,16 +94,36 @@ class VideoProcess:
 
     def crop_patch(self, video, landmarks, cv2_writer=None):
         sequence = []
+        last_missing_landmark_idx = -1
         for frame_idx, frame in enumerate(video):
+            if landmarks[frame_idx] is None:
+                last_missing_landmark_idx = frame_idx
+                print('NO LANDMARKS')
+                if cv2_writer is not None:
+                    cv2_writer.write(
+                        np.zeros((self.crop_height, self.crop_width, 3), dtype=np.uint8)
+                    )
+                    print('Writing none')
+                else:
+                    sequence.append(np.zeros_like(frame))
+
+                continue
+
             window_margin = min(
                 self.window_margin // 2, frame_idx, len(landmarks) - 1 - frame_idx
             )
+            if last_missing_landmark_idx != -1:
+                window_margin = min(
+                    window_margin, frame_idx - last_missing_landmark_idx
+                )
+
             smoothed_landmarks = np.mean(
                 [
                     landmarks[x]
                     for x in range(
                         frame_idx - window_margin, frame_idx + window_margin + 1
                     )
+                    if landmarks[x] is not None
                 ],
                 axis=0,
             )
@@ -134,23 +156,24 @@ class VideoProcess:
             return None
 
         for idx in range(1, len(valid_frames_idx)):
-            if valid_frames_idx[idx] - valid_frames_idx[idx - 1] > 1:
+            if 1 < valid_frames_idx[idx] - valid_frames_idx[idx - 1] < self.max_interpolation_length:
                 landmarks = linear_interpolate(
                     landmarks, valid_frames_idx[idx - 1], valid_frames_idx[idx]
                 )
 
-        valid_frames_idx = [idx for idx, lm in enumerate(landmarks) if lm is not None]
+        # We don't want to fill in the beginning and the end.
+        # valid_frames_idx = [idx for idx, lm in enumerate(landmarks) if lm is not None]
 
-        # Handle corner case: keep frames at the beginning or at the end that failed to be detected
-        if valid_frames_idx:
-            landmarks[: valid_frames_idx[0]] = [
-                landmarks[valid_frames_idx[0]]
-            ] * valid_frames_idx[0]
-            landmarks[valid_frames_idx[-1] :] = [landmarks[valid_frames_idx[-1]]] * (
-                len(landmarks) - valid_frames_idx[-1]
-            )
+        # # Handle corner case: keep frames at the beginning or at the end that failed to be detected
+        # if valid_frames_idx:
+        #     landmarks[: valid_frames_idx[0]] = [
+        #         landmarks[valid_frames_idx[0]]
+        #     ] * valid_frames_idx[0]
+        #     landmarks[valid_frames_idx[-1] :] = [landmarks[valid_frames_idx[-1]]] * (
+        #         len(landmarks) - valid_frames_idx[-1]
+        #     )
 
-        assert all(lm is not None for lm in landmarks), "not every frame has landmark"
+        # assert all(lm is not None for lm in landmarks), "not every frame has landmark"
 
         return landmarks
 

@@ -7,6 +7,7 @@ from src.tokenizer.spm_tokenizer import TextTransform
 from src.avhubert_avsr.avhubert_avsr_model import AVHubertAVSR, get_beam_search_decoder
 from src.avhubert_avsr.configuration_avhubert_avsr import AVHubertAVSRConfig
 from src.talking_detector.segmentation import segment_by_asd
+from script.lip_crop import LazyVideo
 from datasets import load_from_disk
 import torch, torchvision, torchaudio
 from src.cluster.conv_spks import (
@@ -48,15 +49,17 @@ class Dino(nn.Module):
         self.batch_size = batch_size
 
     def __call__(self, video_path):
-        frames, frame_indices = read_video_frames(
-            video_path, frame_stride=1, max_frames=1000000000
-        )
-        if len(frames) == 0:
+        lv = LazyVideo(video_path)
+        if len(lv) == 0:
             raise RuntimeError("No frames decoded from the video.")
 
         all_embeds = []
         with torch.no_grad(), self.autocast_ctx:
-            for batch in tqdm(batched(frames, self.batch_size), total=len(frames) // self.batch_size):
+            for batch in tqdm(batched(lv, self.batch_size), total=len(lv) // self.batch_size):
+                if batch.sum() == 0 and len(all_embeds) > 0:
+                    all_embeds.extend(torch.zeros((len(batch), len(all_embeds[-1])), dtype=all_embeds[-1].dtype, device=all_embeds[-1].device))
+                    continue
+
                 inputs = self.processor(images=batch, return_tensors="pt")
                 inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
@@ -69,8 +72,16 @@ class Dino(nn.Module):
                     # last_hidden_state: [B, seq_len, D] -> take CLS at position 0
                     emb = outputs.last_hidden_state[:, 0, :]  # [B, D]
 
+                embs = emb.detach().to("cpu", dtype=torch.float32)
+                if batch.sum() == 0:
+                    all_embeds.extend(torch.zeros_like(embs))
+                    continue
+                else:
+                    zero_idxes = batch.reshape(batch.shape[0], -1).sum(axis=-1) == 0
+                    embs[zero_idxes].zero_()
+
                 # Move to CPU in float32 for consistent saving
-                all_embeds.extend(emb.detach().to("cpu", dtype=torch.float32))
+                all_embeds.extend(embs)
 
         return torch.stack(all_embeds).unsqueeze(0).unsqueeze(2)
 

@@ -57,6 +57,9 @@ class LazyVideo:
         return self.num_frames
 
     def __getitem__(self, idx: int):
+        if isinstance(idx, slice):
+            return self.decoder.get_frames_in_range(start=max(0, idx.start), stop=min(len(self), idx.stop)).data.numpy()
+
         if idx >= self.num_frames or idx < 0:
             raise IndexError("Index out of range")
 
@@ -71,7 +74,7 @@ class LazyVideo:
         return self.__getitem__(idx)
 
     def __iter__(self):
-        # Decode only the frames we need; each call decodes just that slice.
+        # Decode only the frames we2 need; each call decodes just that slice.
         for start in range(0, self.num_frames, self.stride):
             stop = min(start + self.chunk_size, self.num_frames)
             # Decodes [start, stop) frames only — nothing else is kept in memory
@@ -99,8 +102,8 @@ def process_video(video_path, output_dir=None, process_audio=True):
         assert video.fps == FPS
         landmarks = landmarks_detector(video, output_face_bboxes=False)
 
-        face_segment_name = video_path.split("/")[-1].replace(".mp4", "")
-        segment_name = video_path.split("/")[-1].replace(".mp4", "_lip")
+        face_segment_name = video_path.split("/")[-1].replace(".mp4", "").replace(".avi", "")
+        segment_name = video_path.split("/")[-1].replace(".mp4", "_lip").replace(".avi", "_lip")
         if output_dir is None:
             output_dir = os.path.dirname(video_path)
         os.makedirs(output_dir, exist_ok=True)
