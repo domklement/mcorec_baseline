@@ -172,7 +172,11 @@ def main():
     parser.add_argument('--process_audio', action='store_true')
     opt = parser.parse_args()
 
-    process_video(opt.video, output_dir=opt.output_dir, process_audio=opt.process_audio)
+    try:
+        process_video(opt.video, output_dir=opt.output_dir, process_audio=opt.process_audio)
+    except Exception as e:
+        print(f"Error processing {opt.video}")
+        raise e
 
 
 if __name__ == "__main__":
